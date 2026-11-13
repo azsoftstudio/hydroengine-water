@@ -40,6 +40,39 @@ namespace HydroEngine
         Ready
     }
 
+    /// <summary>
+    /// Maps Unity world XZ coordinates into a stable, meter-based ocean field domain.
+    /// The origin is a precision/rebasing aid; it does not follow an individual mesh.
+    /// </summary>
+    public readonly struct HydroWaveFieldDomain
+    {
+        public readonly Vector2 WorldOriginXZ;
+        public readonly Vector2 FieldOriginMeters;
+        public readonly float WorldUnitsPerMeter;
+
+        public HydroWaveFieldDomain(Vector2 worldOriginXZ, Vector2 fieldOriginMeters, float worldUnitsPerMeter)
+        {
+            WorldOriginXZ = worldOriginXZ;
+            FieldOriginMeters = fieldOriginMeters;
+            WorldUnitsPerMeter = Mathf.Max(0.0001f, worldUnitsPerMeter);
+        }
+
+        /// <summary>Maps a world position to field meters, where wave phases are evaluated.</summary>
+        public Vector2 WorldToFieldMeters(Vector2 worldXZ)
+            => FieldOriginMeters + (worldXZ - WorldOriginXZ) / WorldUnitsPerMeter;
+
+        /// <summary>Maps field meters back to Unity world XZ.</summary>
+        public Vector2 FieldMetersToWorld(Vector2 fieldMeters)
+            => WorldOriginXZ + (fieldMeters - FieldOriginMeters) * WorldUnitsPerMeter;
+
+        /// <summary>
+        /// Returns an equivalent domain with a nearer world origin. Call this when the
+        /// world origin rebases; the field coordinate of the new origin is preserved.
+        /// </summary>
+        public HydroWaveFieldDomain Rebase(Vector2 newWorldOriginXZ)
+            => new HydroWaveFieldDomain(newWorldOriginXZ, WorldToFieldMeters(newWorldOriginXZ), WorldUnitsPerMeter);
+    }
+
     /// <summary>Stable identity for a query that may complete asynchronously.</summary>
     public readonly struct HydroWaveQueryHandle : IEquatable<HydroWaveQueryHandle>
     {
@@ -84,18 +117,18 @@ namespace HydroEngine
         }
     }
 
-    /// <summary>Immutable scene-unit conventions supplied when a backend starts.</summary>
+    /// <summary>Immutable field conventions supplied when a backend starts.</summary>
     public readonly struct HydroWaveBackendContext
     {
-        /// <summary>Unity scene units per meter; defaults to one in typical projects.</summary>
-        public readonly float WorldUnitsPerMeter;
-
         /// <summary>Gravitational acceleration in meters per second squared.</summary>
         public readonly float Gravity;
 
-        public HydroWaveBackendContext(float worldUnitsPerMeter, float gravity)
+        /// <summary>Shared world-to-field coordinate mapping for this ocean field.</summary>
+        public readonly HydroWaveFieldDomain Domain;
+
+        public HydroWaveBackendContext(HydroWaveFieldDomain domain, float gravity)
         {
-            WorldUnitsPerMeter = Mathf.Max(0.0001f, worldUnitsPerMeter);
+            Domain = domain;
             Gravity = Mathf.Max(0f, gravity);
         }
     }
