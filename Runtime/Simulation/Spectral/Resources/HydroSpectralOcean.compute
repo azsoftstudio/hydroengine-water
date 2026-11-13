@@ -1,0 +1,161 @@
+#pragma kernel InitializeSpectrum
+#pragma kernel EvolveSpectrum
+#pragma kernel BitReverse
+#pragma kernel Butterfly
+#pragma kernel BuildDisplacement
+
+// One periodic spectral patch. The renderer may combine this with authored
+// Gerstner swells. Cascades and dynamic disturbances are later milestones.
+RWTexture2D<float4> _H0;
+Texture2D<float4> _ReadSpectrum;
+RWTexture2D<float4> _WriteSpectrum;
+Texture2D<float2> _ReadZ;
+RWTexture2D<float2> _WriteZ;
+Texture2D<float4> _HeightSpectrum;
+Texture2D<float4> _XZSpectrum;
+Texture2D<float2> _ZSpectrum;
+RWTexture2D<float4> _Displacement;
+
+int _Resolution;
+int _StageLength;
+int _Axis;
+float _PatchLength;
+float _WindSpeed;
+float2 _WindDirection;
+float _Amplitude;
+float _WaveTime;
+float _Choppiness;
+float _InverseNormalization;
+
+static const float PI = 3.14159265359;
+
+uint Hash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15;
+    x *= 0x846ca68b; x ^= x >> 16; return x;
+}
+float Random01(uint x) { return (Hash(x) & 0x00ffffff) / 16777216.0; }
+float Gaussian(uint seed)
+{
+    float u1 = max(1e-6, Random01(seed));
+    float u2 = Random01(seed + 0x9e3779b9);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * PI * u2);
+}
+float2 ComplexMul(float2 a, float2 b) { return float2(a.x*b.x-a.y*b.y, a.x*b.y+a.y*b.x); }
+float2 ComplexScaleI(float2 a, float s) { return float2(-a.y*s, a.x*s); }
+
+[numthreads(8,8,1)]
+void InitializeSpectrum(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Resolution || id.y >= _Resolution) return;
+    int2 centered = int2(id.xy) - _Resolution / 2;
+    float2 k = (2.0 * PI / _PatchLength) * float2(centered);
+    float k2 = dot(k,k);
+    if (k2 < 1e-8) { _H0[id.xy] = 0; return; }
+    float kLen = sqrt(k2);
+    float2 wind = normalize(_WindDirection);
+    float L = max(1.0, _WindSpeed * _WindSpeed / 9.81);
+    float alignment = dot(normalize(k), wind);
+    // Phillips spectrum with a small-wave damping term. The directional lobe
+    // retains a reduced amount of counter-wind energy for a less artificial sea.
+    float phillips = _Amplitude * exp(-1.0 / max(1e-6, k2 * L * L))
+        * (0.35 + 0.65 * alignment * alignment) / max(1e-8, k2 * k2)
+    * exp(-k2 * 0.0015);
+    float sigma = sqrt(max(0.0, phillips) * 0.5);
+    uint seed = id.x + id.y * (uint)_Resolution + 19471;
+    _H0[id.xy] = sigma * float4(Gaussian(seed), Gaussian(seed+11), 0, 0);
+}
+
+[numthreads(8,8,1)]
+void EvolveSpectrum(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Resolution || id.y >= _Resolution) return;
+    int2 mirror = int2((_Resolution - id.x) % _Resolution, (_Resolution - id.y) % _Resolution);
+    float2 h0 = _H0[id.xy].xy;
+    float2 h0Mirror = _H0[mirror].xy;
+    float2 centered = float2(int2(id.xy) - _Resolution / 2);
+    float2 k = (2.0 * PI / _PatchLength) * centered;
+    float kLen = length(k);
+    float omega = sqrt(9.81 * kLen);
+    float phase = omega * _WaveTime;
+    float2 positive = ComplexMul(h0, float2(cos(phase), sin(phase)));
+    float2 negative = ComplexMul(float2(h0Mirror.x, -h0Mirror.y), float2(cos(phase), -sin(phase)));
+    float2 height = positive + negative;
+    float2 horizontalX = kLen > 1e-6 ? ComplexScaleI(height, -k.x / kLen * _Choppiness) : 0;
+    float2 horizontalZ = kLen > 1e-6 ? ComplexScaleI(height, -k.y / kLen * _Choppiness) : 0;
+    _WriteSpectrum[id.xy] = float4(height, horizontalX);
+    _WriteZ[id.xy] = horizontalZ;
+}
+
+uint ReverseBits(uint x)
+{
+    uint result = 0;
+    [loop] for (int i = 0; i < 16; i++) { result = (result << 1) | (x & 1); x >>= 1; }
+    return result >> (16 - firstbithigh((uint)_Resolution));
+}
+
+[numthreads(8,8,1)]
+void BitReverse(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Resolution || id.y >= _Resolution) return;
+    uint x = _Axis == 0 ? ReverseBits(id.x) : id.x;
+    uint y = _Axis == 1 ? ReverseBits(id.y) : id.y;
+    _WriteSpectrum[id.xy] = _ReadSpectrum[uint2(x,y)];
+    _WriteZ[id.xy] = _ReadZ[uint2(x,y)];
+}
+
+[numthreads(8,8,1)]
+void Butterfly(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Resolution || id.y >= _Resolution) return;
+    uint coordinate = _Axis == 0 ? id.x : id.y;
+    uint halfLength = (uint)_StageLength >> 1;
+    uint lane = coordinate % (uint)_StageLength;
+    uint lowCoordinate = coordinate - lane + (lane % halfLength);
+    uint highCoordinate = lowCoordinate + halfLength;
+    uint2 low = id.xy, high = id.xy;
+    if (_Axis == 0) { low.x = lowCoordinate; high.x = highCoordinate; }
+    else { low.y = lowCoordinate; high.y = highCoordinate; }
+    // Inverse transform uses the positive-sign twiddle convention.
+    float angle = 2.0 * PI * (lane % halfLength) / _StageLength;
+    float2 twiddle = float2(cos(angle), sin(angle));
+    bool upper = lane >= halfLength;
+    float4 a = _ReadSpectrum[low];
+    float4 b = _ReadSpectrum[high];
+    float2 za = _ReadZ[low], zb = _ReadZ[high];
+    float4 result = upper ? a - float4(ComplexMul(b.xy,twiddle), ComplexMul(b.zw,twiddle))
+                          : a + float4(ComplexMul(b.xy,twiddle), ComplexMul(b.zw,twiddle));
+    float2 zResult = upper ? za - ComplexMul(zb,twiddle) : za + ComplexMul(zb,twiddle);
+    _WriteSpectrum[id.xy] = result;
+    _WriteZ[id.xy] = zResult;
+}
+
+[numthreads(8,8,1)]
+void BuildDisplacement(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Resolution || id.y >= _Resolution) return;
+    float sign = ((id.x + id.y) & 1) ? -1.0 : 1.0;
+    float4 h = _HeightSpectrum[id.xy];
+    float4 xz = _XZSpectrum[id.xy];
+    float2 z = _ZSpectrum[id.xy];
+    float height = h.x * sign * _InverseNormalization;
+    float dx = xz.z * sign * _InverseNormalization;
+    float dz = z.x * sign * _InverseNormalization;
+    uint2 left = uint2((id.x + _Resolution - 1) % _Resolution, id.y);
+    uint2 right = uint2((id.x + 1) % _Resolution, id.y);
+    uint2 down = uint2(id.x, (id.y + _Resolution - 1) % _Resolution);
+    uint2 up = uint2(id.x, (id.y + 1) % _Resolution);
+    float dxL = _XZSpectrum[left].z * (((left.x+left.y)&1)?-1:1) * _InverseNormalization;
+    float dxR = _XZSpectrum[right].z * (((right.x+right.y)&1)?-1:1) * _InverseNormalization;
+    float dxD = _XZSpectrum[down].z * (((down.x+down.y)&1)?-1:1) * _InverseNormalization;
+    float dxU = _XZSpectrum[up].z * (((up.x+up.y)&1)?-1:1) * _InverseNormalization;
+    float dzL = _ZSpectrum[left].x * (((left.x+left.y)&1)?-1:1) * _InverseNormalization;
+    float dzR = _ZSpectrum[right].x * (((right.x+right.y)&1)?-1:1) * _InverseNormalization;
+    float dzD = _ZSpectrum[down].x * (((down.x+down.y)&1)?-1:1) * _InverseNormalization;
+    float dzU = _ZSpectrum[up].x * (((up.x+up.y)&1)?-1:1) * _InverseNormalization;
+    float cell = _PatchLength / _Resolution;
+    float dxx = (dxR-dxL)/(2.0*cell), dxz = (dxU-dxD)/(2.0*cell);
+    float dzx = (dzR-dzL)/(2.0*cell), dzz = (dzU-dzD)/(2.0*cell);
+    float compression = 1.0 - ((1.0+dxx)*(1.0+dzz)-dxz*dzx);
+    _Displacement[id.xy] = float4(dx, height, dz, compression);
+}
