@@ -76,14 +76,15 @@ FFT is periodic by construction for a finite patch. Multiple cascades reduce obv
 
 ## Execution roadmap and gates
 
-### Phase 0 — lock the contract (next)
+### Phase 0 — lock the contract (in progress)
 
-- Define surface-state data, coordinate conventions, time ownership, query semantics, backend capabilities, and quality knobs in code-level design notes.
+- `Runtime/Simulation/HydroWaveBackend.cs` now defines model selection, capability flags, a shared simulation step, surface sample semantics, and distinct synchronous/asynchronous query APIs. It is a contract only; it does not connect or change the current surface behavior.
+- Next define serializable shared and model-specific settings, then a small still backend adapter and backend owner. Keep `HydroSurface`'s current flat behavior until those pieces exist.
 - Document what “accurate” means for this real-time asset: stable rendered/query agreement and plausible visual spectrum, not full Navier–Stokes or exact oceanographic prediction.
 - Make a test matrix for close, mid, horizon, high/low camera angles, large domains, varying mesh density, compute unavailable, and time scaling.
 - Do not reconnect the current experimental FFT bridge until it conforms to the contract.
 
-**Gate:** there is one authoritative definition for time, displacement space, and validity, plus a visual/numeric comparison procedure for both backends.
+**Gate:** the API and settings define one authoritative time, displacement space, and validity contract, plus visual/numeric comparison procedures for both backends. Phase 0 is not complete yet.
 
 ### Phase 1 — robust Gerstner backend
 
