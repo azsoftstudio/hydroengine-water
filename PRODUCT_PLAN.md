@@ -79,9 +79,10 @@ FFT is periodic by construction for a finite patch. Multiple cascades reduce obv
 ### Phase 0 — lock the contract (in progress)
 
 - `Runtime/Simulation/HydroWaveBackend.cs` now defines model selection, capability flags, a shared simulation step, surface sample semantics, and distinct synchronous/asynchronous query APIs. It is a contract only; it does not connect or change the current surface behavior.
-- `Runtime/Simulation/HydroWaveSimulationProfile.cs` defines shared sea-state inputs and the long/mid/short wavelength bands. One runtime ocean-field owner will own the selected backend and simulation clock; mesh patches in the same ocean will consume that owner and field origin rather than each making their own waves or time. It does not use Unity shader globals.
-- `HydroWaveFieldDomain` maps world XZ positions to stable field meters and supports rebasing while preserving phase coordinates. The geometry rest position is transformed through this mapping before the backend evaluates displacement; query inputs use world XZ and must resolve against that same field.
-- Next implement a small still backend adapter and the runtime field owner. Keep `HydroSurface`'s current flat behavior until both selectable wave backends are implemented and can publish valid render/query data.
+- `Runtime/Simulation/HydroWaveSimulationProfile.cs` defines shared sea-state inputs and long/mid/short wavelength bands. It is the reusable shared configuration; it is not a shader-global value.
+- `HydroWaveFieldDomain` maps world XZ positions to stable field meters and supports rebasing while preserving phase coordinates. Geometry rest positions and world-XZ queries must go through the same mapping.
+- `Runtime/Simulation/HydroWaveSimulation.cs` now owns one ocean field's profile reference, simulation clock, and domain. Multiple mesh patches should reference the same owner; it does not instantiate a backend or change the still-water surface yet.
+- Next add backend lifecycle/selection to this owner and a still backend adapter, then implement Gerstner. Keep `HydroSurface`'s current flat behavior until the selected backend can publish valid render/query data.
 - Document what “accurate” means for this real-time asset: stable rendered/query agreement and plausible visual spectrum, not full Navier–Stokes or exact oceanographic prediction.
 - Make a test matrix for close, mid, horizon, high/low camera angles, large domains, varying mesh density, compute unavailable, and time scaling.
 - Do not reconnect the current experimental FFT bridge until it conforms to the contract.
